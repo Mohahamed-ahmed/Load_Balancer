@@ -1,6 +1,10 @@
 const http = require('node:http');
 
-const server3 = http.createServer((req,res)=>{    
+const server3 = http.createServer((req,res)=>{   
+    if (req.url === "/favicon.ico") {
+        res.writeHead(204);
+        return res.end();
+    } 
     res.writeHead(200, {'Content-Type': 'text/plain'});
     res.end('Hello from Backend 3!');
 })
