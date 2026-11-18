@@ -79,11 +79,52 @@ const checkBackendHealth = () => {
   }
 };
 
+const buckets = new Map();
+
 const server = http.createServer((req, res) => {
   if (req.url === '/favicon.ico') {
     res.writeHead(204);
     return res.end();
   }
+  const ip = req.socket.remoteAddress;
+  if(!buckets.has(ip)){
+    buckets.set(ip,{
+      tokens: 10,
+      lastRefill: Date.now()
+    })
+  }
+
+  const bucket = buckets.get(ip);
+  const now = Date.now();
+  const timeSinceLastRefill = now - bucket.lastRefill;
+  console.log('time'+timeSinceLastRefill);
+
+  if(timeSinceLastRefill >= 1000){
+    let tokensToAdd = Math.floor(timeSinceLastRefill / 1000);
+    bucket.tokens = Math.min(bucket.tokens + tokensToAdd, 10);
+    bucket.lastRefill += tokensToAdd * 1000
+     console.log({
+    tokens: bucket.tokens,
+    tokensToAdd,
+    lastRefill: bucket.lastRefill,
+    now,
+  });
+  }
+
+  console.log(`Tokens count for ${ip}: ${bucket.tokens}`);
+
+  
+  if (bucket.tokens === 0) {
+    console.log("Before request", bucket.tokens);
+    res.writeHead(429);
+    return res.end('Too many requests');
+  }
+
+  bucket.tokens--;
+  console.log("After request", bucket.tokens);
+  
+  console.log(buckets)
+  console.log(buckets.get(ip))
 
   const backend = getNextHealthyBackend();
 
