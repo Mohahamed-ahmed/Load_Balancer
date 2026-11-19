@@ -8,6 +8,13 @@ let backends = [
   { port: 3003, status: 'healthy' },
 ];
 
+const metrics = {
+  requestsTotal: 0,
+  retriesTotal: 0,
+  rateLimitedTotal: 0,
+  backendFailuresTotal: 0,
+};
+
 let currentBackendIndex = 0;
 
 const getNextHealthyBackend = () => {
@@ -52,7 +59,8 @@ const proxyRequest = (req, res, backend) => {
       res.end('No healthy backends available');
       return;
     }
-
+    metrics.backendFailuresTotal++;
+    metrics.retriesTotal++;
     proxyRequest(req, res, nextBackend);
   });
 
@@ -88,6 +96,7 @@ const server = http.createServer((req, res) => {
     res.writeHead(204);
     return res.end();
   }
+  metrics.requestsTotal++;
 
   if(req.method === 'GET' && req.url === '/backends'){
     res.writeHead(200, {'Content-Type': 'application/json'});
@@ -100,23 +109,32 @@ const server = http.createServer((req, res) => {
       body += chunk.toString();
     });
     req.on('end', () => {
-      const newBackend = JSON.parse(body);
-      backends.push(newBackend);
-      if(!newBackend.port){
+      let newBackend;
+
+      try{
+        newBackend = JSON.parse(body);
+      }
+      catch(e){
+        res.writeHead(400);
+        return res.end('Invalid JSON');
+      }
+      
+      if(newBackend.port === undefined){
         res.writeHead(400);
         return res.end('Port is required');
-      }
-      if(backends.some(b => b.port === newBackend.port)){
-        res.writeHead(400);
-        return res.end('Backend with this port already exists');
       }
       if(typeof newBackend.port !== 'number'){
         res.writeHead(400);
         return res.end('Port must be a number');
       }
+      if(backends.some(b => b.port === newBackend.port)){
+        res.writeHead(400);
+        return res.end('Backend with this port already exists');
+      }
       if(!newBackend.status){
         newBackend.status = 'healthy';
       }
+      backends.push(newBackend);
       res.writeHead(201, {'Content-Type': 'application/json'});
       return res.end(JSON.stringify(newBackend));
     });
@@ -137,6 +155,29 @@ const server = http.createServer((req, res) => {
     backends = newBackends;
     res.writeHead(200, {'Content-Type': 'application/json'});
     return res.end(JSON.stringify({ message: 'Backend deleted' }));
+  }
+
+  if(req.method === 'GET' && req.url === '/metrics'){
+    const metricsText =`
+      # HELP requests_total Total requests
+      # TYPE requests_total counter
+      requests_total ${metrics.requestsTotal}
+
+      # HELP retries_total Total retries
+      # TYPE retries_total counter
+      retries_total ${metrics.retriesTotal}
+
+      # HELP rate_limited_total Rate limited requests
+      # TYPE rate_limited_total counter
+      rate_limited_total ${metrics.rateLimitedTotal}
+
+      # HELP backend_failures_total Backend failures
+      # TYPE backend_failures_total counter
+      backend_failures_total ${metrics.backendFailuresTotal}
+  `;
+    res.writeHead(200, {'Content-Type': 'text/plain'});
+
+    return res.end(metricsText);
   }
 
   const ip = req.socket.remoteAddress;
@@ -176,6 +217,7 @@ const server = http.createServer((req, res) => {
   
   if (bucket.tokens === 0) {
     log('Rate Limiting', { ip, tokens: bucket.tokens, message: 'Too many requests' });
+    metrics.rateLimitedTotal++;
     res.writeHead(429);
     return res.end('Too many requests');
   }
@@ -193,8 +235,24 @@ const server = http.createServer((req, res) => {
   }
 
   proxyRequest(req, res, backend);
+
 });
 
 server.listen(3000);
 
-setInterval(checkBackendHealth, 5000);
+
+const healthCheckInterval = setInterval(checkBackendHealth, 5000);
+
+const shutdown = () => {
+  console.log('Shutting down gracefully...');
+
+  clearInterval(healthCheckInterval);
+
+  server.close(() => {
+    console.log('HTTP server closed.');
+    process.exit(0);
+  })
+}
+
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);
