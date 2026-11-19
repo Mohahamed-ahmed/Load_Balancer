@@ -1,5 +1,7 @@
 const http = require('node:http');
 
+const {log} = require('./logger');
+
 let backends = [
   { port: 3001, status: 'healthy' },
   { port: 3002, status: 'healthy' },
@@ -148,13 +150,17 @@ const server = http.createServer((req, res) => {
   const bucket = buckets.get(ip);
   const now = Date.now();
   const timeSinceLastRefill = now - bucket.lastRefill;
-  console.log('time'+timeSinceLastRefill);
+  log('Rate Limiting', {
+    ip,
+    tokens: bucket.tokens,
+    timeSinceLastRefill
+  });
 
   if(timeSinceLastRefill >= 1000){
     let tokensToAdd = Math.floor(timeSinceLastRefill / 1000);
     bucket.tokens = Math.min(bucket.tokens + tokensToAdd, 10);
     bucket.lastRefill += tokensToAdd * 1000
-     console.log({
+     log('Rate Limiting',{
     tokens: bucket.tokens,
     tokensToAdd,
     lastRefill: bucket.lastRefill,
@@ -162,20 +168,22 @@ const server = http.createServer((req, res) => {
   });
   }
 
-  console.log(`Tokens count for ${ip}: ${bucket.tokens}`);
-
+  log('Rate Limiting', {
+    ip,
+    tokens: bucket.tokens,
+    timeSinceLastRefill
+  });
   
   if (bucket.tokens === 0) {
-    console.log("Before request", bucket.tokens);
+    log('Rate Limiting', { ip, tokens: bucket.tokens, message: 'Too many requests' });
     res.writeHead(429);
     return res.end('Too many requests');
   }
 
   bucket.tokens--;
-  console.log("After request", bucket.tokens);
+  log('Rate Limiting', { ip, tokens: bucket.tokens, message: 'Request processed' });
   
-  console.log(buckets)
-  console.log(buckets.get(ip))
+  log('Rate Limiting', { ip, tokens: bucket.tokens, message: 'Backend selected' });
 
   const backend = getNextHealthyBackend();
 
