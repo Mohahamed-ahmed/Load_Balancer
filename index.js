@@ -86,6 +86,57 @@ const server = http.createServer((req, res) => {
     res.writeHead(204);
     return res.end();
   }
+
+  if(req.method === 'GET' && req.url === '/backends'){
+    res.writeHead(200, {'Content-Type': 'application/json'});
+    return res.end(JSON.stringify(backends));
+  }
+
+  if(req.method === 'POST' && req.url === '/backends'){
+    let body = '';
+    req.on('data', chunk => {
+      body += chunk.toString();
+    });
+    req.on('end', () => {
+      const newBackend = JSON.parse(body);
+      backends.push(newBackend);
+      if(!newBackend.port){
+        res.writeHead(400);
+        return res.end('Port is required');
+      }
+      if(backends.some(b => b.port === newBackend.port)){
+        res.writeHead(400);
+        return res.end('Backend with this port already exists');
+      }
+      if(typeof newBackend.port !== 'number'){
+        res.writeHead(400);
+        return res.end('Port must be a number');
+      }
+      if(!newBackend.status){
+        newBackend.status = 'healthy';
+      }
+      res.writeHead(201, {'Content-Type': 'application/json'});
+      return res.end(JSON.stringify(newBackend));
+    });
+  }
+
+  if(req.method === 'DELETE' && req.url.startsWith('/backends/')){
+    const port = parseInt(req.url.split('/')[2]);
+    if(Number.isNaN(port)){
+      res.writeHead(400);
+      return res.end('Port must be a number');
+    }
+    const backend = backends.find(b => b.port === port);
+    if(!backend){
+      res.writeHead(404);
+      return res.end('Backend not found');
+    }
+    const newBackends = backends.filter(b => b.port !== port);
+    backends = newBackends;
+    res.writeHead(200, {'Content-Type': 'application/json'});
+    return res.end(JSON.stringify({ message: 'Backend deleted' }));
+  }
+
   const ip = req.socket.remoteAddress;
   if(!buckets.has(ip)){
     buckets.set(ip,{
