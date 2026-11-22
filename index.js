@@ -1,95 +1,12 @@
 const http = require('node:http');
 
-const {log} = require('./logger');
-
-let backends = [
-  { port: 3001, status: 'healthy' },
-  { port: 3002, status: 'healthy' },
-  { port: 3003, status: 'healthy' },
-];
-
-const metrics = {
-  requestsTotal: 0,
-  retriesTotal: 0,
-  rateLimitedTotal: 0,
-  backendFailuresTotal: 0,
-};
-
-let currentBackendIndex = 0;
-
-const getNextHealthyBackend = () => {
-  let checked = 0;
-
-  while (checked < backends.length) {
-    const backend = backends[currentBackendIndex];
-
-    currentBackendIndex = (currentBackendIndex + 1) % backends.length;
-
-    if (backend.status === 'healthy') {
-      return backend;
-    }
-
-    checked++;
-  }
-
-  return null;
-};
-
-const proxyRequest = (req, res, backend) => {
-  const options = {
-    hostname: 'localhost',
-    port: backend.port,
-    path: req.url,
-    method: req.method,
-  };
-
-  const proxy = http.request(options, (backendRes) => {
-    res.writeHead(backendRes.statusCode, backendRes.headers);
-
-    backendRes.pipe(res);
-  });
-
-  proxy.on('error', () => {
-    backend.status = 'unhealthy';
-
-    const nextBackend = getNextHealthyBackend();
-
-    if (!nextBackend) {
-      res.writeHead(503);
-      res.end('No healthy backends available');
-      return;
-    }
-    metrics.backendFailuresTotal++;
-    metrics.retriesTotal++;
-    proxyRequest(req, res, nextBackend);
-  });
-
-  req.pipe(proxy);
-};
-
-const checkBackendHealth = () => {
-  for (const backend of backends) {
-    const healthReq = http.request(
-      {
-        hostname: 'localhost',
-        port: backend.port,
-        method: 'GET',
-      },
-      (healthRes) => {
-        backend.status =
-          healthRes.statusCode === 200 ? 'healthy' : 'unhealthy';
-      }
-    );
-
-    healthReq.on('error', () => {
-      backend.status = 'unhealthy';
-    });
-
-    healthReq.end();
-  }
-};
-
-const buckets = new Map();
+const { getBackends, setBackends } = require('./config/backends');
+const { rateLimiter } = require('./middleware/rateLimiter');
+const { checkBackendHealth } = require('./services/healthCheck');
+const { getNextHealthyBackend } = require('./services/loadBalancer');
+const metrics = require('./services/metrics');
+const { proxyRequest } = require('./services/proxy');
+const { registerShutdown } = require('./services/shutdown');
 
 const server = http.createServer((req, res) => {
   if (req.url === '/favicon.ico') {
@@ -100,7 +17,7 @@ const server = http.createServer((req, res) => {
 
   if(req.method === 'GET' && req.url === '/backends'){
     res.writeHead(200, {'Content-Type': 'application/json'});
-    return res.end(JSON.stringify(backends));
+    return res.end(JSON.stringify(getBackends()));
   }
 
   if(req.method === 'POST' && req.url === '/backends'){
@@ -127,14 +44,14 @@ const server = http.createServer((req, res) => {
         res.writeHead(400);
         return res.end('Port must be a number');
       }
-      if(backends.some(b => b.port === newBackend.port)){
+      if(getBackends().some(b => b.port === newBackend.port)){
         res.writeHead(400);
         return res.end('Backend with this port already exists');
       }
       if(!newBackend.status){
         newBackend.status = 'healthy';
       }
-      backends.push(newBackend);
+      getBackends().push(newBackend);
       res.writeHead(201, {'Content-Type': 'application/json'});
       return res.end(JSON.stringify(newBackend));
     });
@@ -146,13 +63,13 @@ const server = http.createServer((req, res) => {
       res.writeHead(400);
       return res.end('Port must be a number');
     }
-    const backend = backends.find(b => b.port === port);
+    const backend = getBackends().find(b => b.port === port);
     if(!backend){
       res.writeHead(404);
       return res.end('Backend not found');
     }
-    const newBackends = backends.filter(b => b.port !== port);
-    backends = newBackends;
+    const newBackends = getBackends().filter(b => b.port !== port);
+    setBackends(newBackends);
     res.writeHead(200, {'Content-Type': 'application/json'});
     return res.end(JSON.stringify({ message: 'Backend deleted' }));
   }
@@ -180,52 +97,9 @@ const server = http.createServer((req, res) => {
     return res.end(metricsText);
   }
 
-  const ip = req.socket.remoteAddress;
-  if(!buckets.has(ip)){
-    buckets.set(ip,{
-      tokens: 10,
-      lastRefill: Date.now()
-    })
+  if (!rateLimiter(req, res, metrics)) {
+    return;
   }
-
-  const bucket = buckets.get(ip);
-  const now = Date.now();
-  const timeSinceLastRefill = now - bucket.lastRefill;
-  log('Rate Limiting', {
-    ip,
-    tokens: bucket.tokens,
-    timeSinceLastRefill
-  });
-
-  if(timeSinceLastRefill >= 1000){
-    let tokensToAdd = Math.floor(timeSinceLastRefill / 1000);
-    bucket.tokens = Math.min(bucket.tokens + tokensToAdd, 10);
-    bucket.lastRefill += tokensToAdd * 1000
-     log('Rate Limiting',{
-    tokens: bucket.tokens,
-    tokensToAdd,
-    lastRefill: bucket.lastRefill,
-    now,
-  });
-  }
-
-  log('Rate Limiting', {
-    ip,
-    tokens: bucket.tokens,
-    timeSinceLastRefill
-  });
-  
-  if (bucket.tokens === 0) {
-    log('Rate Limiting', { ip, tokens: bucket.tokens, message: 'Too many requests' });
-    metrics.rateLimitedTotal++;
-    res.writeHead(429);
-    return res.end('Too many requests');
-  }
-
-  bucket.tokens--;
-  log('Rate Limiting', { ip, tokens: bucket.tokens, message: 'Request processed' });
-  
-  log('Rate Limiting', { ip, tokens: bucket.tokens, message: 'Backend selected' });
 
   const backend = getNextHealthyBackend();
 
@@ -243,16 +117,4 @@ server.listen(3000);
 
 const healthCheckInterval = setInterval(checkBackendHealth, 5000);
 
-const shutdown = () => {
-  console.log('Shutting down gracefully...');
-
-  clearInterval(healthCheckInterval);
-
-  server.close(() => {
-    console.log('HTTP server closed.');
-    process.exit(0);
-  })
-}
-
-process.on('SIGINT', shutdown);
-process.on('SIGTERM', shutdown);
+registerShutdown(server, healthCheckInterval);
