@@ -6,7 +6,7 @@ A simple HTTP load balancer built with Node.js built-in modules. The project dem
 
 - Round Robin load balancing
 - Automatic backend health checks (every 5 seconds)
-- Automatic retry when a backend becomes unavailable
+- Automatic retry using another healthy backend
 - Token Bucket rate limiting
 - Prometheus-compatible metrics endpoint
 - Graceful shutdown (`SIGINT` / `SIGTERM`)
@@ -77,7 +77,7 @@ The load balancer uses the **Token Bucket** algorithm.
 
 Every **5 seconds** the load balancer checks all configured backends.
 
-If a backend becomes unavailable:
+If a backend fails a health check or a proxied request
 
 - it is marked as **unhealthy**
 - new requests are skipped
